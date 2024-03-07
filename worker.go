@@ -12,3 +12,11 @@ type goWorker struct {
 	//最后一次使用的时间
 	lastUsedTime time.Time
 }
+
+func newGoWorker(pool *Pool) *goWorker {
+
+	gw := goWorker{}
+	gw.pool = pool
+	gw.tashChan = make(chan TaskFunc)
+	return &gw
+}
