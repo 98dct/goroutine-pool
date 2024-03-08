@@ -209,6 +209,7 @@ func (p *Pool) CloseWithTimeOut(timeout time.Duration) error {
 	return nil
 }
 
+//协程池关闭了的化，会关闭无缓冲管道closed channel  能从select中读取到默认值，返回true 。没关的化不走select 返回false
 func (p *Pool) IsClosed() bool {
 	select {
 	case <-p.closed:
@@ -218,4 +219,72 @@ func (p *Pool) IsClosed() bool {
 	}
 
 	return false
+}
+
+//定期清理： 长时间未使用的*goWorker
+func (p *Pool) goPurge() {
+	if p.option.DisablePurge {
+		return
+	}
+
+	ticker := time.NewTicker(p.option.MaxIdleTime)
+	defer func() {
+		ticker.Stop()
+		atomic.StoreInt32(&p.purgeDone, 1)
+	}()
+
+	for {
+		select {
+		case <-p.closed:
+			return
+		case <-ticker.C: //1s检测一次
+			isDormant := false
+			p.lock.Lock()
+			//获取空闲的协程对象
+			n := p.Running()
+			expireWorkers := p.local.clearExpire(p.option.MaxIdleTime)
+			if n == 0 || n == int32(len(expireWorkers)) { //如果全部清理掉
+				isDormant = true
+			}
+
+			p.lock.Unlock()
+
+			for i := range expireWorkers {
+				expireWorkers[i].stop()
+				expireWorkers[i] = nil
+			}
+
+			//通知所有等待的任务（激活）
+			if isDormant && p.Waiting() > 0 {
+				p.cond.Broadcast()
+			}
+
+		}
+	}
+
+}
+
+//循环使用协程对象
+func (p *Pool) recycle(gw *goWorker) bool {
+
+	//容量已经满了（不回收）
+	if (p.Cap() > 0 && p.Cap() < p.Running()) || p.IsClosed() {
+		p.cond.Broadcast()
+		return false
+	}
+
+	// 修改最后一次使用时间
+	gw.lastUsedTime = time.Now()
+	p.lock.Lock()
+	if err := p.local.insert(gw); err != nil {
+		p.lock.Unlock()
+		return false
+	}
+
+	p.lock.Unlock()
+
+	//通知 getGoWorker() 函数有 *goWorker可以使用
+	p.cond.Signal()
+
+	return true
 }
